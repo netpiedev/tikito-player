@@ -2,6 +2,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { FullScreenLoader } from '@/src/components/FullScreenLoader';
 import { useAvailableSlotsQuery } from '@/src/hooks/use-auth';
@@ -237,7 +238,18 @@ export default function GroundSlotsScreen() {
             selectedSlots.length ? 'bg-gold-light/90' : 'bg-surface-elevated'
           }`}
           disabled={!selectedSlots.length}
-          onPress={() => {
+          onPress={async () => {
+            if (!selectedSlots.length) return;
+            
+            // Generate a unique key for this booking session
+            const bookingSessionKey = `booking_slots_${Date.now()}`;
+            
+            // Save slots to AsyncStorage to avoid URL length limitations
+            await AsyncStorage.setItem(bookingSessionKey, JSON.stringify({
+              slots: selectedSlots,
+              timestamp: Date.now()
+            }));
+            
             router.push({
               pathname: '/turf/[turfId]/ground/[groundId]/book',
               params: {
@@ -250,7 +262,7 @@ export default function GroundSlotsScreen() {
                   typeof params.groundName === 'string'
                     ? params.groundName
                     : '',
-                slots: JSON.stringify(selectedSlots),
+                bookingSessionKey,
               },
             });
           }}
