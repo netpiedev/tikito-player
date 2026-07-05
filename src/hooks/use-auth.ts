@@ -5,7 +5,9 @@ import {
   bookSlot,
   type Booking,
   type BookSlotPayload,
+  type BookSlotResponse,
   createPaymentOrder,
+  type CreateOrderPayload,
   fetchCurrentUser,
   fetchAvailableSlots,
   fetchGroundDetails,
@@ -93,7 +95,7 @@ export function useAvailableSlotsQuery(turfGroundId?: string, enabled = true) {
 }
 
 export function useBookSlotMutation() {
-  return useMutation({
+  return useMutation<BookSlotResponse, Error, BookSlotPayload>({
     mutationFn: (payload: BookSlotPayload) => bookSlot(payload),
   });
 }
@@ -127,7 +129,7 @@ export function useResetPasswordMutation() {
 
 export function useCreatePaymentOrderMutation() {
   return useMutation({
-    mutationFn: (bookingId: string) => createPaymentOrder(bookingId),
+    mutationFn: (payload: CreateOrderPayload) => createPaymentOrder(payload),
   });
 }
 

@@ -1,8 +1,8 @@
-import { router, useLocalSearchParams, Redirect } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Linking from 'expo-linking';
 import * as WebBrowser from 'expo-web-browser';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -37,119 +37,218 @@ export default function BookScreen() {
     groundId?: string;
     turfName?: string;
     groundName?: string;
-    slots?: string;
+    bookingSessionKey?: string;
   }>();
 
   const bookSlotMutation = useBookSlotMutation();
   const createOrderMutation = useCreatePaymentOrderMutation();
   const verifyPaymentMutation = useVerifyPaymentMutation();
   const [isProcessing, setIsProcessing] = useState(false);
+  const [selectedSlots, setSelectedSlots] = useState<AvailableSlot[]>([]);
+  const [isLoadingSlots, setIsLoadingSlots] = useState(true);
 
-  const selectedSlots =
-    typeof params.slots === 'string'
-      ? (JSON.parse(params.slots) as AvailableSlot[])
-      : [];
+  useEffect(() => {
+    async function loadSelectedSlots() {
+      try {
+        setIsLoadingSlots(true);
+
+        // Try to get slots from AsyncStorage first (preferred method)
+        let slotsData: AvailableSlot[] = [];
+
+        if (params.bookingSessionKey) {
+          const storedData = await AsyncStorage.getItem(params.bookingSessionKey);
+          if (storedData) {
+            const parsed = JSON.parse(storedData);
+            slotsData = parsed.slots || [];
+            console.log('[DEBUG] Loaded slots from AsyncStorage:', slotsData.length, 'slots');
+
+            // Clean up the storage after reading
+            await AsyncStorage.removeItem(params.bookingSessionKey);
+
+            // Clean up any old booking session data (older than 1 hour)
+            const allKeys = await AsyncStorage.getAllKeys();
+            const oldSessionKeys = allKeys.filter(
+              (key) =>
+                key.startsWith('booking_slots_') &&
+                key !== params.bookingSessionKey,
+            );
+
+            for (const oldKey of oldSessionKeys) {
+              try {
+                const oldData = await AsyncStorage.getItem(oldKey);
+                if (oldData) {
+                  const oldParsed = JSON.parse(oldData);
+                  if (Date.now() - (oldParsed.timestamp || 0) > 60 * 60 * 1000) {
+                    await AsyncStorage.removeItem(oldKey);
+                  }
+                }
+              } catch (e) {
+                // Ignore errors when cleaning up old data
+              }
+            }
+          }
+        }
+
+        // Fallback to URL params for backward compatibility
+        if (slotsData.length === 0) {
+          const slotsParam = (params as any).slots;
+          if (typeof slotsParam === 'string') {
+            slotsData = JSON.parse(slotsParam) as AvailableSlot[];
+            console.log('[DEBUG] Loaded slots from URL params (fallback):', slotsData.length, 'slots');
+          }
+        }
+
+        setSelectedSlots(slotsData);
+        console.log('[DEBUG] Final selected slots count:', slotsData.length);
+        console.log('[DEBUG] Final selected slots IDs:', slotsData.map((s) => s?.slot_id));
+      } catch (error) {
+        console.error('[ERROR] Failed to load selected slots:', error);
+        setSelectedSlots([]);
+      } finally {
+        setIsLoadingSlots(false);
+      }
+    }
+
+    loadSelectedSlots();
+  }, [params.bookingSessionKey]);
 
   const totalAmount = selectedSlots.reduce((sum, slot) => sum + slot.price, 0);
 
-  if (!selectedSlots.length) {
+  if (isLoadingSlots) {
     return <FullScreenLoader label="Loading booking details..." />;
   }
 
+  if (!selectedSlots.length) {
+    return (
+      <SafeAreaView className="flex-1 bg-surface-bg" edges={['left', 'right', 'bottom']}>
+        <View className="flex-1 items-center justify-center px-5">
+          <Text className="text-lg font-semibold text-gold mb-4">
+            No slots selected
+          </Text>
+          <Text className="text-sm text-ink-secondary text-center mb-6">
+            Please go back and select at least one slot to proceed with booking.
+          </Text>
+          <Pressable
+            className="bg-gold-light/90 min-h-[48px] px-6 rounded-2xl items-center justify-center"
+            onPress={() => router.back()}
+          >
+            <Text className="text-base font-black text-pitch-dim">
+              Go Back
+            </Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ── Unauthenticated: save intent and redirect to login ──────────────────
+  const handleLoginToBook = async () => {
+    try {
+      await AsyncStorage.setItem(
+        'pendingBooking',
+        JSON.stringify({ pathname: '/turf/[turfId]/ground/[groundId]/book', params }),
+      );
+      router.push('/(auth)/login');
+    } catch (err) {
+      console.error('Failed to save pending booking', err);
+      router.push('/(auth)/login');
+    }
+  };
+
+  // ── Authenticated: book all slots then pay in one order ─────────────────
   const handleConfirmAndPay = async () => {
     setIsProcessing(true);
 
     try {
-      // Step 1: Book all selected slots
-      const bookingResults = await Promise.all(
-        selectedSlots.map((slot) =>
-          bookSlotMutation.mutateAsync({ slot_id: slot.slot_id }),
-        ),
-      );
+      // Step 1: Book ALL selected slots in a single API call
+      const bookingResult = await bookSlotMutation.mutateAsync({
+        slot_ids: selectedSlots.map((s) => s.slot_id),
+      });
 
-      // Get the first booking ID for payment
-      const bookingId = bookingResults[0]?.booking_id;
+      const { booking_ids: bookingIds } = bookingResult;
 
-      if (!bookingId) {
-        throw new Error('Booking created but no booking ID returned.');
+      if (!bookingIds?.length) {
+        throw new Error('Booking created but no booking IDs returned.');
       }
 
-      // Step 2: Create Razorpay order
+      // Step 2: Create ONE consolidated Razorpay order for the total amount
       const callbackUrl = Linking.createURL('/payment-success');
-      const order = await createOrderMutation.mutateAsync(bookingId);
+      const order = await createOrderMutation.mutateAsync({
+        booking_ids: bookingIds,
+        callback_url: callbackUrl,
+      });
 
       // Step 3: Open payment page in browser
       const baseUrl =
         process.env.EXPO_PUBLIC_API_BASE_URL ?? 'https://api.tikito.in';
       const token = await getStoredToken();
-      const payUrl = `${baseUrl}/pay?key=${encodeURIComponent(order.key)}&amount=${order.amount}&orderId=${encodeURIComponent(order.order_id)}&bookingId=${encodeURIComponent(bookingId)}&callbackUrl=${encodeURIComponent(callbackUrl)}&token=${encodeURIComponent(token || '')}`;
+      const bookingIdsEncoded = encodeURIComponent(bookingIds.join(','));
 
-      console.log('Payment URL:', payUrl);
-      console.log('Callback URL:', callbackUrl);
+      const payUrl =
+        `${baseUrl}/pay` +
+        `?key=${encodeURIComponent(order.key)}` +
+        `&amount=${order.amount}` +
+        `&orderId=${encodeURIComponent(order.order_id)}` +
+        `&bookingIds=${bookingIdsEncoded}` +
+        `&callbackUrl=${encodeURIComponent(callbackUrl)}` +
+        `&token=${encodeURIComponent(token || '')}`;
+
+      console.log('[PAYMENT] Payment URL:', payUrl);
 
       const result = await WebBrowser.openAuthSessionAsync(
         payUrl,
         'tikito-player://payment-success',
       );
 
-      // Step 4: Handle the result
+      // Step 4: Handle browser result
       console.log('[PAYMENT] WebBrowser result type:', result.type);
-      console.log('[PAYMENT] WebBrowser result url:', result.type === 'success' ? result.url : 'N/A');
 
       if (result.type === 'success' && result.url) {
-        // Parse deep link params
         const url = Linking.parse(result.url);
-        const orderId = url.queryParams?.orderId as string | undefined;
+        const orderId   = url.queryParams?.orderId   as string | undefined;
         const paymentId = url.queryParams?.paymentId as string | undefined;
         const signature = url.queryParams?.signature as string | undefined;
-        const returnedBookingId = (url.queryParams?.bookingId as string) || bookingId;
+
+        // Deep-link may return bookingIds comma-joined; fall back to local list
+        const returnedIdsRaw = url.queryParams?.bookingIds as string | undefined;
+        const returnedBookingIds = returnedIdsRaw
+          ? returnedIdsRaw.split(',').filter(Boolean)
+          : bookingIds;
 
         if (orderId && paymentId && signature) {
-          // Verify payment on backend
+          // Step 5: Verify the consolidated payment — confirms ALL bookings
           await verifyPaymentMutation.mutateAsync({
-            booking_id: returnedBookingId,
-            razorpay_order_id: orderId,
+            booking_ids:         returnedBookingIds,
+            razorpay_order_id:   orderId,
             razorpay_payment_id: paymentId,
-            razorpay_signature: signature,
+            razorpay_signature:  signature,
           });
 
-          // Only navigate to success after payment is verified
           router.replace({
             pathname: '/turf/[turfId]/ground/[groundId]/success',
             params: {
-              turfId: typeof params.turfId === 'string' ? params.turfId : '',
-              groundId:
-                typeof params.groundId === 'string' ? params.groundId : '',
-              turfName:
-                typeof params.turfName === 'string' ? params.turfName : '',
-              groundName:
-                typeof params.groundName === 'string' ? params.groundName : '',
+              turfId:     typeof params.turfId     === 'string' ? params.turfId     : '',
+              groundId:   typeof params.groundId   === 'string' ? params.groundId   : '',
+              turfName:   typeof params.turfName   === 'string' ? params.turfName   : '',
+              groundName: typeof params.groundName === 'string' ? params.groundName : '',
             },
           });
         } else {
-          // Deep link came back without payment params
           Alert.alert(
             'Payment incomplete',
             'Payment was not completed. Your booking is pending.',
             [
-              {
-                text: 'Go to Bookings',
-                onPress: () => router.replace('/profile/bookings'),
-              },
+              { text: 'Go to Bookings', onPress: () => router.replace('/profile/bookings') },
               { text: 'OK' },
             ],
           );
         }
       } else if (result.type === 'cancel' || result.type === 'dismiss') {
-        // User closed the browser — webhook will handle payment confirmation
         Alert.alert(
           'Payment pending',
-          'If you completed the payment, your booking will be confirmed shortly via our server. Check "My Bookings" for status.',
+          'If you completed the payment, your booking will be confirmed shortly. Check "My Bookings" for status.',
           [
-            {
-              text: 'Go to Bookings',
-              onPress: () => router.replace('/profile/bookings'),
-            },
+            { text: 'Go to Bookings', onPress: () => router.replace('/profile/bookings') },
             { text: 'OK' },
           ],
         );
@@ -161,22 +260,6 @@ export default function BookScreen() {
       );
     } finally {
       setIsProcessing(false);
-    }
-  };
-
-  const handleLoginToBook = async () => {
-    try {
-      await AsyncStorage.setItem(
-        'pendingBooking',
-        JSON.stringify({
-          pathname: '/turf/[turfId]/ground/[groundId]/book',
-          params: params,
-        })
-      );
-      router.push('/(auth)/login');
-    } catch (err) {
-      console.error('Failed to save pending booking', err);
-      router.push('/(auth)/login');
     }
   };
 
@@ -231,9 +314,7 @@ export default function BookScreen() {
                 Ground
               </Text>
               <Text className="mt-1 text-base font-black text-gold">
-                {typeof params.groundName === 'string'
-                  ? params.groundName
-                  : 'Ground'}
+                {typeof params.groundName === 'string' ? params.groundName : 'Ground'}
               </Text>
             </View>
           </View>
@@ -247,8 +328,7 @@ export default function BookScreen() {
                 ₹ {totalAmount}
               </Text>
               <Text className="text-sm font-semibold text-gold">
-                {selectedSlots.length} slot
-                {selectedSlots.length === 1 ? '' : 's'}
+                {selectedSlots.length} slot{selectedSlots.length === 1 ? '' : 's'}
               </Text>
             </View>
           </View>
@@ -320,8 +400,7 @@ export default function BookScreen() {
                 isPending ? 'text-ink-secondary' : 'text-gold'
               }`}
             >
-              {selectedSlots.length} slot
-              {selectedSlots.length === 1 ? '' : 's'} · Secure payment
+              {selectedSlots.length} slot{selectedSlots.length === 1 ? '' : 's'} · Secure payment
             </Text>
           </View>
 

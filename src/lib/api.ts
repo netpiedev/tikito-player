@@ -76,7 +76,13 @@ export type AvailableSlot = {
 };
 
 export type BookSlotPayload = {
-  slot_id: string;
+  slot_ids: string[];
+};
+
+export type BookSlotResponse = {
+  booking_ids: string[];
+  message: string;
+  total_slots: number;
 };
 
 export type Booking = {
@@ -231,12 +237,12 @@ export async function fetchAvailableSlots(turfGroundId: string) {
   }
 }
 
-export async function bookSlot(payload: BookSlotPayload) {
+export async function bookSlot(payload: BookSlotPayload): Promise<BookSlotResponse> {
   try {
-    const { data } = await apiClient.post('/users/book', payload);
+    const { data } = await apiClient.post<BookSlotResponse>('/users/book', payload);
 
-    if (data?.error) {
-      throw new Error(data.error);
+    if ((data as any)?.error) {
+      throw new Error((data as any).error);
     }
 
     return data;
@@ -300,25 +306,34 @@ export async function resetPassword(payload: ResetPasswordPayload) {
 
 // ─── Payment ─────────────────────────────────────────────────────────────────
 
+export type CreateOrderPayload = {
+  booking_ids: string[];
+  callback_url?: string;
+};
+
 export type CreateOrderResponse = {
   order_id: string;
   amount: number;
   currency: string;
-  booking_id: string;
+  /** All booking IDs covered by this consolidated order */
+  booking_ids: string[];
   key: string;
+  callback_url?: string;
 };
 
 export type VerifyPaymentPayload = {
-  booking_id: string;
+  /** All booking IDs that belong to the order */
+  booking_ids: string[];
   razorpay_order_id: string;
   razorpay_payment_id: string;
   razorpay_signature: string;
 };
 
-export async function createPaymentOrder(bookingId: string) {
+export async function createPaymentOrder(payload: CreateOrderPayload) {
   try {
     const { data } = await apiClient.post<CreateOrderResponse>(
-      `/users/payment/create-order?booking_id=${bookingId}`,
+      '/users/payment/create-order',
+      payload,
     );
     return data;
   } catch (error) {
