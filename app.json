@@ -45,7 +45,8 @@
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       },
-      "appleTeamId": "TVH3M8C5WK"
+      "appleTeamId": "TVH3M8C5WK",
+      "buildNumber": "7"
     },
     "android": {
       "adaptiveIcon": {
