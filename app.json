@@ -2,7 +2,7 @@
   "expo": {
     "name": "Tikito",
     "slug": "tikito-player",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "scheme": "tikito-player",
     "platforms": [
       "ios",
@@ -46,7 +46,7 @@
         "ITSAppUsesNonExemptEncryption": false
       },
       "appleTeamId": "TVH3M8C5WK",
-      "buildNumber": "7"
+      "buildNumber": "9"
     },
     "android": {
       "adaptiveIcon": {
